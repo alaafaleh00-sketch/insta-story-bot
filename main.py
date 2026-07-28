@@ -5,7 +5,7 @@ import logging
 import requests
 from telebot import TeleBot, types
 
-# 1. إعداد الـ Logging
+# 1. إعداد الـ Logging لمتابعة عمل البوت في Railway
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -14,19 +14,19 @@ logger = logging.getLogger(__name__)
 
 # 2. جلب متغيرات البيئة من Railway
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "de17445a54msh4c64319ee7db803p13eaBejsn2e402b20a043").strip()
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CHANNEL_1 = os.environ.get("CHANNEL_1", "").strip()
 CHANNEL_2 = os.environ.get("CHANNEL_2", "").strip()
 
 RAPIDAPI_HOST = "instagram-public-bulk-scraper.p.rapidapi.com"
 
-if not BOT_TOKEN:
-    logger.critical("❌ خطأ: لم يتم العثور على BOT_TOKEN!")
+if not BOT_TOKEN or not RAPIDAPI_KEY:
+    logger.critical("❌ خطأ: لم يتم العثور على BOT_TOKEN أو RAPIDAPI_KEY في متغيرات البيئة!")
     exit(1)
 
 bot = TeleBot(BOT_TOKEN)
 
-# 3. تنظيف واستخراج اليوزر
+# 3. دالة تنظيف واستخراج اسم المستخدم من النصوص والروابط
 def extract_clean_username(text: str) -> str:
     if not text:
         return ""
@@ -35,7 +35,7 @@ def extract_clean_username(text: str) -> str:
     raw_user = match.group(1) if match else clean_text
     return re.sub(r'[^a-zA-Z0-9_\.]', '', raw_user).strip('.')
 
-# 4. فحص الاشتراك
+# 4. دالة فحص الاشتراك بالقنوات
 def check_channel_subscription(user_id: int) -> bool:
     channels = [c for c in [CHANNEL_1, CHANNEL_2] if c]
     if not channels:
@@ -47,11 +47,12 @@ def check_channel_subscription(user_id: int) -> bool:
             member = bot.get_chat_member(ch_name, user_id)
             if member.status in ['left', 'kicked']:
                 return False
-        except Exception:
+        except Exception as e:
+            logger.warning(f"تعذر فحص القناة {ch}: {e}")
             continue
     return True
 
-# 5. لوحة الأزرار
+# 5. لوحة أزرار الاشتراك الإجباري
 def build_sub_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     if CHANNEL_1:
@@ -64,10 +65,11 @@ def build_sub_keyboard():
     markup.add(types.InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="verify_sub"))
     return markup
 
-# 6. معالج /start
+# 6. معالج أمر /start
 @bot.message_handler(commands=['start', 'help'])
 def start_handler(message):
-    if not check_channel_subscription(message.from_user.id):
+    user_id = message.from_user.id
+    if not check_channel_subscription(user_id):
         bot.reply_to(
             message,
             "⚠️ <b>يجب عليك الاشتراك في قنوات البوت أولاً لاستخدامه.</b>",
@@ -84,7 +86,7 @@ def start_handler(message):
         parse_mode="HTML"
     )
 
-# 7. معالج زر التحقق
+# 7. معالج زر التحقق من الاشتراك
 @bot.callback_query_handler(func=lambda call: call.data == "verify_sub")
 def verify_sub_callback(call):
     if check_channel_subscription(call.from_user.id):
@@ -98,10 +100,12 @@ def verify_sub_callback(call):
     else:
         bot.answer_callback_query(call.id, "❌ لم تشترك بجميع القنوات بعد!", show_alert=True)
 
-# 8. معالج طلب الستوري عبر RapidAPI
+# 8. معالج طلب الستوريات الرئيسي عبر RapidAPI
 @bot.message_handler(func=lambda message: True)
 def process_story_request(message):
-    if not check_channel_subscription(message.from_user.id):
+    user_id = message.from_user.id
+
+    if not check_channel_subscription(user_id):
         bot.reply_to(
             message,
             "⚠️ <b>يجب الاشتراك بالقنوات أولاً لاستخدام البوت:</b>",
@@ -118,7 +122,7 @@ def process_story_request(message):
     safe_username = html.escape(username)
     status_msg = bot.reply_to(message, f"⚡ <b>جاري جلب ستوريات @{safe_username}...</b>", parse_mode="HTML")
 
-    # الرابط الدقيق المأخوذ من شاشة RapidAPI
+    # الاتصال برابط الخدمة من RapidAPI
     url = f"https://{RAPIDAPI_HOST}/v1/download_story"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
@@ -130,7 +134,6 @@ def process_story_request(message):
         response = requests.get(url, headers=headers, params=params, timeout=20)
         res_data = response.json()
 
-        # استخراج القائمة
         stories = []
         if isinstance(res_data, list):
             stories = res_data
@@ -159,7 +162,7 @@ def process_story_request(message):
 
         if not media_group:
             bot.edit_message_text(
-                f"ℹ️ <b>تعذر استخراج الستوري أو أن الحساب ليس لديه ستوريات حالياً @{safe_username}.</b>",
+                f"ℹ️ <b>تعذر استخراج روابط الستوري للحساب @{safe_username}.</b>",
                 chat_id=message.chat.id,
                 message_id=status_msg.message_id,
                 parse_mode="HTML"
