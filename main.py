@@ -5,7 +5,6 @@ import html
 import logging
 from telebot import TeleBot, types
 from instagrapi import Client
-from instagrapi.exceptions import RateLimitError, ClientLoginRequiredError, ClientError
 
 # 1. إعداد الـ Logging
 logging.basicConfig(
@@ -28,36 +27,30 @@ bot = TeleBot(BOT_TOKEN)
 cl = Client()
 cl.request_timeout = 20
 
-# 3. إعداد الجلسة وتمرير جميع الكوكيز المطلوبة منعاً للـ 403
+# 3. إعداد الجلسة والكوكيز بدون أخطاء
 def setup_instagram_session():
     try:
         session_dict = json.loads(INSTA_SESSION)
-        
-        # استخراج sessionid من الكوكيز
         cookies = session_dict.get("cookies", {})
         session_id = cookies.get("sessionid", "")
 
         if session_id:
-            # استخراج ds_user_id تلقائياً من الجزء الأول لـ sessionid
             user_id_match = re.match(r'^(\d+)', session_id)
             ds_user_id = user_id_match.group(1) if user_id_match else ""
-
-            # بناء هيكل الكوكيز المتكامل الموثوق لإنستغرام
-            complete_cookies = {
+            session_dict["cookies"] = {
                 "sessionid": session_id,
                 "ds_user_id": ds_user_id,
-                "csrftoken": "missing",
+                "csrftoken": "missing"
             }
-            session_dict["cookies"] = complete_cookies
             
         cl.set_settings(session_dict)
-        logger.info("✅ تم إعداد جلسة إنستغرام والكوكيز بنجاح.")
+        logger.info("✅ تم إعداد جلسة إنستغرام بنجاح.")
     except Exception as e:
         logger.error(f"❌ خطأ في إعداد الجلسة: {e}")
 
 setup_instagram_session()
 
-# 4. دالة تنظيف اليوزر
+# 4. دالة استخراج وتنظيف اسم المستخدم
 def extract_clean_username(text: str) -> str:
     if not text:
         return ""
@@ -68,7 +61,7 @@ def extract_clean_username(text: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9_\.]', '', raw_user)
     return cleaned.strip('.')
 
-# 5. فحص الاشتراك
+# 5. فحص اشتراك القنوات
 def check_channel_subscription(user_id: int) -> bool:
     channels = [c for c in [CHANNEL_1, CHANNEL_2] if c]
     if not channels:
@@ -85,7 +78,7 @@ def check_channel_subscription(user_id: int) -> bool:
             continue
     return True
 
-# 6. لوحة الأزرار
+# 6. لوحة أزرار القنوات
 def build_sub_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     if CHANNEL_1:
@@ -133,7 +126,7 @@ def verify_sub_callback(call):
     else:
         bot.answer_callback_query(call.id, "❌ لم تشترك بجميع القنوات بعد!", show_alert=True)
 
-# 9. معالج طلب الستوريات
+# 9. معالج الطلبات الرئيسي
 @bot.message_handler(func=lambda message: True)
 def process_story_request(message):
     user_id = message.from_user.id
@@ -156,13 +149,8 @@ def process_story_request(message):
     status_msg = bot.reply_to(message, f"⚡ <b>جاري البحث عن ستوريات @{safe_username}...</b>", parse_mode="HTML")
 
     try:
-        # المحاولة عبر دالة v1 الجاهزة أولاً
-        try:
-            target_id = cl.user_id_from_username(username)
-        except Exception:
-            user_info = cl.user_info_by_username_v1(username)
-            target_id = user_info.pk
-
+        # جلب ID الحساب ثم الستوريات
+        target_id = cl.user_id_from_username(username)
         stories = cl.user_stories(target_id)
 
         if not stories:
@@ -188,32 +176,22 @@ def process_story_request(message):
 
         bot.delete_message(message.chat.id, status_msg.message_id)
 
-    except (ClientLoginRequiredError, ClientError) as e:
-        logger.error(f"Login or session error: {e}")
-        bot.edit_message_text(
-            "⚠️ <b>جاري تحديث الاتصال بإنستغرام، يرجى المحاولة بعد قليل.</b>",
-            chat_id=message.chat.id,
-            message_id=status_msg.message_id,
-            parse_mode="HTML"
-        )
-    except RateLimitError:
-        logger.error(f"Rate limit hit for {username}")
-        bot.edit_message_text(
-            "🔥 <b>السيرفر يواجه ضغطاً مؤقتاً، أعد المحاولة بعد دقيقة.</b>",
-            chat_id=message.chat.id,
-            message_id=status_msg.message_id,
-            parse_mode="HTML"
-        )
     except Exception as e:
         logger.error(f"Error handling {username}: {e}")
+        err_str = str(e).lower()
+        if "login" in err_str or "403" in err_str or "429" in err_str:
+            msg = "⚠️ <b>السيرفر يواجه تقييداً مؤقتاً من إنستغرام، يرجى إعادة المحاولة بعد قليل.</b>"
+        else:
+            msg = f"❌ <b>تعذر جلب الستوريات للحساب @{safe_username}.</b>\n\nتأكد أن الحساب <b>عام (Public)</b> وليس خاصاً."
+
         bot.edit_message_text(
-            f"❌ <b>تعذر جلب الستوريات للحساب @{safe_username}.</b>\n\nتأكد أن الحساب <b>عام (Public)</b> وليس خاصاً.",
+            msg,
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
             parse_mode="HTML"
         )
 
 if __name__ == "__main__":
-    logger.info("🚀 البوت يعمل الآن...")
+    logger.info("🚀 البوت يعمل الآن بنجاح واستقرار تام...")
     bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=30)
     
