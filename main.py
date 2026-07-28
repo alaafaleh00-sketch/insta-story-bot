@@ -5,16 +5,16 @@ import logging
 import requests
 from telebot import TeleBot, types
 
-# 1. إعداد الـ Logging لمتابعة عمل البوت في Railway
+# 1. إعداد الـ Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# 2. جلب متغيرات البيئة من Railway
+# 2. قراءة متغيرات البيئة من Railway
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "de17445a54msh4c64319ee7db803p13eaBejsn2e402b20a043").strip()
 CHANNEL_1 = os.environ.get("CHANNEL_1", "").strip()
 CHANNEL_2 = os.environ.get("CHANNEL_2", "").strip()
 
@@ -26,7 +26,7 @@ if not BOT_TOKEN or not RAPIDAPI_KEY:
 
 bot = TeleBot(BOT_TOKEN)
 
-# 3. دالة تنظيف واستخراج اسم المستخدم من النصوص والروابط
+# 3. دالة تنظيف واستخراج اسم المستخدم
 def extract_clean_username(text: str) -> str:
     if not text:
         return ""
@@ -86,7 +86,7 @@ def start_handler(message):
         parse_mode="HTML"
     )
 
-# 7. معالج زر التحقق من الاشتراك
+# 7. معالج زر التحقق
 @bot.callback_query_handler(func=lambda call: call.data == "verify_sub")
 def verify_sub_callback(call):
     if check_channel_subscription(call.from_user.id):
@@ -122,7 +122,6 @@ def process_story_request(message):
     safe_username = html.escape(username)
     status_msg = bot.reply_to(message, f"⚡ <b>جاري جلب ستوريات @{safe_username}...</b>", parse_mode="HTML")
 
-    # الاتصال برابط الخدمة من RapidAPI
     url = f"https://{RAPIDAPI_HOST}/v1/download_story"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
