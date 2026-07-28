@@ -1,10 +1,9 @@
 import os
 import re
-import json
 import html
 import logging
+import requests
 from telebot import TeleBot, types
-from instagrapi import Client
 
 # 1. إعداد الـ Logging
 logging.basicConfig(
@@ -13,55 +12,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 2. جلب متغيرات البيئة
+# 2. جلب متغيرات البيئة من Railway
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-INSTA_SESSION = os.environ.get("INSTA_SESSION")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "de17445a54msh4c64319ee7db803p13eaBejsn2e402b20a043").strip()
 CHANNEL_1 = os.environ.get("CHANNEL_1", "").strip()
 CHANNEL_2 = os.environ.get("CHANNEL_2", "").strip()
 
-if not BOT_TOKEN or not INSTA_SESSION:
-    logger.critical("❌ خطأ: لم يتم العثور على BOT_TOKEN أو INSTA_SESSION!")
+RAPIDAPI_HOST = "instagram-public-bulk-scraper.p.rapidapi.com"
+
+if not BOT_TOKEN:
+    logger.critical("❌ خطأ: لم يتم العثور على BOT_TOKEN!")
     exit(1)
 
 bot = TeleBot(BOT_TOKEN)
-cl = Client()
-cl.request_timeout = 20
 
-# 3. إعداد الجلسة والكوكيز بدون أخطاء
-def setup_instagram_session():
-    try:
-        session_dict = json.loads(INSTA_SESSION)
-        cookies = session_dict.get("cookies", {})
-        session_id = cookies.get("sessionid", "")
-
-        if session_id:
-            user_id_match = re.match(r'^(\d+)', session_id)
-            ds_user_id = user_id_match.group(1) if user_id_match else ""
-            session_dict["cookies"] = {
-                "sessionid": session_id,
-                "ds_user_id": ds_user_id,
-                "csrftoken": "missing"
-            }
-            
-        cl.set_settings(session_dict)
-        logger.info("✅ تم إعداد جلسة إنستغرام بنجاح.")
-    except Exception as e:
-        logger.error(f"❌ خطأ في إعداد الجلسة: {e}")
-
-setup_instagram_session()
-
-# 4. دالة استخراج وتنظيف اسم المستخدم
+# 3. تنظيف واستخراج اليوزر
 def extract_clean_username(text: str) -> str:
     if not text:
         return ""
     clean_text = text.split('?')[0].strip()
-    url_pattern = r'(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9_\.]+)'
-    match = re.search(url_pattern, clean_text)
+    match = re.search(r'instagram\.com/([a-zA-Z0-9_\.]+)', clean_text)
     raw_user = match.group(1) if match else clean_text
-    cleaned = re.sub(r'[^a-zA-Z0-9_\.]', '', raw_user)
-    return cleaned.strip('.')
+    return re.sub(r'[^a-zA-Z0-9_\.]', '', raw_user).strip('.')
 
-# 5. فحص اشتراك القنوات
+# 4. فحص الاشتراك
 def check_channel_subscription(user_id: int) -> bool:
     channels = [c for c in [CHANNEL_1, CHANNEL_2] if c]
     if not channels:
@@ -73,12 +47,11 @@ def check_channel_subscription(user_id: int) -> bool:
             member = bot.get_chat_member(ch_name, user_id)
             if member.status in ['left', 'kicked']:
                 return False
-        except Exception as e:
-            logger.warning(f"تعذر فحص القناة {ch}: {e}")
+        except Exception:
             continue
     return True
 
-# 6. لوحة أزرار القنوات
+# 5. لوحة الأزرار
 def build_sub_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     if CHANNEL_1:
@@ -91,11 +64,10 @@ def build_sub_keyboard():
     markup.add(types.InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="verify_sub"))
     return markup
 
-# 7. معالج أمر /start
+# 6. معالج /start
 @bot.message_handler(commands=['start', 'help'])
 def start_handler(message):
-    user_id = message.from_user.id
-    if not check_channel_subscription(user_id):
+    if not check_channel_subscription(message.from_user.id):
         bot.reply_to(
             message,
             "⚠️ <b>يجب عليك الاشتراك في قنوات البوت أولاً لاستخدامه.</b>",
@@ -112,7 +84,7 @@ def start_handler(message):
         parse_mode="HTML"
     )
 
-# 8. معالج زر التحقق
+# 7. معالج زر التحقق
 @bot.callback_query_handler(func=lambda call: call.data == "verify_sub")
 def verify_sub_callback(call):
     if check_channel_subscription(call.from_user.id):
@@ -126,12 +98,10 @@ def verify_sub_callback(call):
     else:
         bot.answer_callback_query(call.id, "❌ لم تشترك بجميع القنوات بعد!", show_alert=True)
 
-# 9. معالج الطلبات الرئيسي
+# 8. معالج طلب الستوري عبر RapidAPI
 @bot.message_handler(func=lambda message: True)
 def process_story_request(message):
-    user_id = message.from_user.id
-
-    if not check_channel_subscription(user_id):
+    if not check_channel_subscription(message.from_user.id):
         bot.reply_to(
             message,
             "⚠️ <b>يجب الاشتراك بالقنوات أولاً لاستخدام البوت:</b>",
@@ -146,14 +116,28 @@ def process_story_request(message):
         return
 
     safe_username = html.escape(username)
-    status_msg = bot.reply_to(message, f"⚡ <b>جاري البحث عن ستوريات @{safe_username}...</b>", parse_mode="HTML")
+    status_msg = bot.reply_to(message, f"⚡ <b>جاري جلب ستوريات @{safe_username}...</b>", parse_mode="HTML")
+
+    # الرابط الدقيق المأخوذ من شاشة RapidAPI
+    url = f"https://{RAPIDAPI_HOST}/v1/download_story"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_HOST
+    }
+    params = {"username": username}
 
     try:
-        # جلب ID الحساب ثم الستوريات
-        target_id = cl.user_id_from_username(username)
-        stories = cl.user_stories(target_id)
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        res_data = response.json()
 
-        if not stories:
+        # استخراج القائمة
+        stories = []
+        if isinstance(res_data, list):
+            stories = res_data
+        elif isinstance(res_data, dict):
+            stories = res_data.get("data") or res_data.get("stories") or res_data.get("items") or [res_data]
+
+        if not stories or (isinstance(stories, list) and len(stories) == 0):
             bot.edit_message_text(
                 f"ℹ️ <b>لا توجد ستوريات نشطة حالياً للحساب @{safe_username}.</b>",
                 chat_id=message.chat.id,
@@ -163,11 +147,24 @@ def process_story_request(message):
             return
 
         media_group = []
-        for story in stories:
-            if story.media_type == 1:
-                media_group.append(types.InputMediaPhoto(str(story.thumbnail_url)))
-            elif story.media_type == 2:
-                media_group.append(types.InputMediaVideo(str(story.video_url)))
+        for item in stories:
+            if isinstance(item, dict):
+                video_url = item.get("video_url") or item.get("download_url") or (item.get("video_versions", [{}])[0].get("url") if item.get("video_versions") else None)
+                image_url = item.get("image_url") or item.get("display_url") or item.get("thumbnail_url")
+
+                if video_url and ("mp4" in str(video_url).lower() or item.get("is_video")):
+                    media_group.append(types.InputMediaVideo(video_url))
+                elif image_url:
+                    media_group.append(types.InputMediaPhoto(image_url))
+
+        if not media_group:
+            bot.edit_message_text(
+                f"ℹ️ <b>تعذر استخراج الستوري أو أن الحساب ليس لديه ستوريات حالياً @{safe_username}.</b>",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                parse_mode="HTML"
+            )
+            return
 
         chunk_size = 10
         for i in range(0, len(media_group), chunk_size):
@@ -177,21 +174,15 @@ def process_story_request(message):
         bot.delete_message(message.chat.id, status_msg.message_id)
 
     except Exception as e:
-        logger.error(f"Error handling {username}: {e}")
-        err_str = str(e).lower()
-        if "login" in err_str or "403" in err_str or "429" in err_str:
-            msg = "⚠️ <b>السيرفر يواجه تقييداً مؤقتاً من إنستغرام، يرجى إعادة المحاولة بعد قليل.</b>"
-        else:
-            msg = f"❌ <b>تعذر جلب الستوريات للحساب @{safe_username}.</b>\n\nتأكد أن الحساب <b>عام (Public)</b> وليس خاصاً."
-
+        logger.error(f"RapidAPI Error for {username}: {e}")
         bot.edit_message_text(
-            msg,
+            f"❌ <b>تعذر جلب الستوريات للحساب @{safe_username}.</b>\n\nتأكد أن الحساب <b>عام (Public)</b> وليس خاصاً.",
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
             parse_mode="HTML"
         )
 
 if __name__ == "__main__":
-    logger.info("🚀 البوت يعمل الآن بنجاح واستقرار تام...")
-    bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=30)
+    logger.info("🚀 البوت يعمل الآن بنجاح مع RapidAPI...")
+    bot.infinity_polling(skip_pending=True)
     
